@@ -136,3 +136,8 @@ The folder also carries Karpathy's `makemore.py` and `names.txt` from [karpathy/
 ## Credits
 
 All lecture material by [Andrej Karpathy](https://github.com/karpathy) — [Zero to Hero](https://karpathy.ai/zero-to-hero.html), [nanoGPT](https://github.com/karpathy/nanoGPT), [makemore](https://github.com/karpathy/makemore). Tiny Shakespeare comes from [char-rnn](https://github.com/karpathy/char-rnn).
+
+## 🔗 More
+
+- Author: [@pop123-ux](https://github.com/pop123-ux)
+- Medium write-ups: [medium.com/@Pop123](https://medium.com/@Pop123)
