@@ -1,8 +1,16 @@
 import math
+import tiktoken
 from dataclasses import dataclass
 import torch
 import torch.nn as nn
 from torch.nn import functional as F
+
+device = 'cpu'
+if torch.cuda.is_available():
+    device = 'cuda'
+elif hasattr(torch.backends, 'mps') and torch.backends.mps.is_available():
+    device = 'mps'
+print (f"using device: {device}")
 
 @dataclass
 class GPTConfig:
@@ -12,7 +20,6 @@ class GPTConfig:
     n_head: int = 12 # number of heads
     n_embd: int = 768 # embedding dimension
     dropout: float = 0.2
-
 class CausalSelfAttention(nn.Module):
 
     def __init__(self, config):
@@ -51,7 +58,8 @@ class CausalSelfAttention(nn.Module):
         return y
         
 class MLP(nn.Module):
-    
+    """Multi-Layer Perceptron that expands the representation and applies GELU.
+       Essentially performs a large nonlinear transformation on each token independently."""
     def __init__(self, config):
         super().__init__()
         self.c_fc = nn.Linear(config.n_embd, 4 * config.n_embd)
@@ -66,8 +74,20 @@ class MLP(nn.Module):
         x = self.dropout(x)
         return x
     
-class Block(nn.Module):
+"""
+x
+↓
+Linear | in_features → hidden_features (in_features*4)
+↓
+GELU
+↓
+Linear | (in_features*4) hidden_features → out_features
+↓
+Dropout
+"""
 
+class Block(nn.Module):
+    """Transformer Block"""
     def __init__(self, config):
         super().__init__()
         self.ln_1 = nn.LayerNorm(config.n_embd)
@@ -75,7 +95,7 @@ class Block(nn.Module):
         self.ln_2 = nn.LayerNorm(config.n_embd)
         self.mlp = MLP(config)
 
-    def forward(self, x): # The gradients from the top flow straight to the inputs, through the residual pathways, unchanged -- (because of the addition) | In addition to that the gradient flows through the blocks and the blocks kick in and change the optimization over time 
+    def forward(self, x): # The gradients from the top flow straight to the inputs, through the residual pathways (dy/dx = I + dF/dx because of the addition) | In addition to that the gradient flows through the blocks and the blocks kick in and change the optimization over time 
         x = x + self.attn(self.ln_1(x))
         x = x + self.mlp(self.ln_2(x))
         return x
@@ -87,13 +107,20 @@ class GPT(nn.Module):
         self.config = config
 
         self.transformer = nn.ModuleDict(dict(
-            wte = nn.Embedding(config.vocab_size, config.n_embd),
-            wpe = nn.Embedding(config.block_size, config.n_embd),
+            # meaning of token + location of token
+            wte = nn.Embedding(config.vocab_size, config.n_embd), # word/token embedding (B,T) -> (B,T,num_dim)
+            wpe = nn.Embedding(config.block_size, config.n_embd), # word position embedding (location of token)
+            # the transformer blocks
             h = nn.ModuleList([Block(config) for _ in range(config.n_layer)]),
+            # final layernorm
             ln_f = nn.LayerNorm(config.n_embd),
         ))
-        self.lm_head = nn.Linear(config.n_embd, config.vocab_size, bias=False)
-    
+        # language model head
+        self.lm_head = nn.Linear(config.n_embd, config.vocab_size, bias=False) # (B,T,num_dim) -> (B,T,50257)
+
+        # weight tying
+        self.transformer.wte.weight = self.lm_head.weight
+        
     def forward(self, idx):
         # idx is of shape (B, T)
         B, T = idx.size()
@@ -111,6 +138,7 @@ class GPT(nn.Module):
         logits = self.lm_head(x) # (B, T, vocab_size)
         return logits
     
+        
     @classmethod
     def from_pretrained(cls, model_type):
         assert model_type in {'gpt2', 'gpt2-medium', 'gpt2-large', 'gpt2-xl'}
@@ -156,53 +184,73 @@ class GPT(nn.Module):
                     sd[k].copy_(sd_hf[k])
 
         return model
+    
+    def predict(self, sequence, max_length, num_return_seq, verbose=True):
+            enc = tiktoken.get_encoding('gpt2')
+            tokens = enc.encode(sequence)
+            tokens = torch.tensor(tokens, dtype=torch.long) # (len(sequence),)
+            tokens = tokens.unsqueeze(0).repeat(num_return_seq, 1) # (num_return_seq, len(sequence)) | generates num_return_seq continuations simultaneously
+            
+            x = tokens.to(device)
+            
+            model = self # instantiate GPT model
+            model.eval()
+            model.to(device)
+            torch.manual_seed(42)
+            torch.cuda.manual_seed(42)
+            # autoregressive generation = one token at a time
+            while x.size(1) < max_length:
+                previous_shape = tuple(x.shape)
 
-# attempt to autodetect the device
-device = 'cpu'
-if torch.cuda.is_available():
-    device = 'cuda'
-elif hasattr(torch.backends, 'mps') and torch.backends.mps.is_available():
-    device = 'mps' # MPS stands for the macOS Metal Programming Framework
-print(f"using device: {device}")
+                # all_logits: (B, T, vocab_size)
+                all_logits = model(x)
 
-num_return_sequences = 5
-max_length = 30
+                # We only need the prediction made from the final position.
+                # next_token_logits: (B, vocab_size)
+                next_token_logits = all_logits[:, -1, :]
 
-model = GPT.from_pretrained('gpt2')
-model.eval() # Good practice to put the model into eval when we aren't training it, just using it
-model.to(device)
+                # Keep the 50 highest-logit candidates for EACH sequence.
+                # Both tensors have shape (B, 50).
+                topk_logits, topk_indices = torch.topk(
+                    next_token_logits,
+                    k=50,
+                    dim=-1
+                )
 
-# prefix tokens
-import tiktoken
-enc = tiktoken.get_encoding('gpt2')
-tokens = enc.encode("Hello, I'm a language model,")
-tokens = torch.tensor(tokens, dtype=torch.long) # (8,)
-tokens = tokens.unsqueeze(0).repeat(num_return_sequences, 1) # (5, 8)
-x = tokens.to(device)
+                # Convert only those 50 candidate logits into probabilities.
+                topk_probs = F.softmax(topk_logits, dim=-1)
 
-# generate!
-torch.manual_seed(42)
-torch.cuda.manual_seed(42)
-while x.size(1) < max_length:
-    # forward the model to get the logits
-    with torch.no_grad():
-        logits = model(x) # (B, T, vocab_size)
-        # take the logits at the last position
-        logits = logits[:, -1, :] # (B, vocab_size)
-        # get the probabilities
-        probs = F.softmax(logits, dim=-1)
-        # do top-k sampling of 50 (huggingface pipeline default)
-        # topk_probs here becomes (5, 50), topk_indices is (5, 50)
-        topk_probs, topk_indices = torch.topk(probs, 50, dim=-1)
-        # select a token from the top-k probabilities
-        ix = torch.multinomial(topk_probs, 1) # (B, 1)
-        # gather the corresponding indices
-        xcol = torch.gather(topk_indices, -1, ix) # (B, 1)
-        # append to the sequence
-        x = torch.cat((x, xcol), dim=1)
+                # Choose ONE candidate position independently for EACH row.
+                # Shape: (B, 1). These are positions 0..49, NOT vocabulary IDs.
+                ix = torch.multinomial(topk_probs, num_samples=1)
 
-# print the generated text
-for i in range(num_return_sequences):
-    tokens = x[i, :max_length].tolist()
-    decoded = enc.decode(tokens)
-    print(">", decoded)
+                # Translate each sampled top-k position into the actual GPT-2 token ID.
+                # Shape: (B, 1).
+                xcol = torch.gather(topk_indices, dim=-1, index=ix)
+
+                # Append one token to every existing sequence.
+                # Because dim=1 is the sequence-length dimension:
+                # (B, T) + (B, 1) -> (B, T+1)
+                # The number of sequences B does NOT increase.
+                x = torch.cat((x, xcol), dim=1)
+
+                if verbose:
+                    sampled_text = [
+                        enc.decode([token_id])
+                        for token_id in xcol.squeeze(1).tolist()
+                    ]
+
+                    print(
+                        f"batch shape: {previous_shape} -> {tuple(x.shape)}\n"
+                        f"next-token logits shape: {next_token_logits.shape}\n"
+                        f"sampled top-k positions (one per sequence):\n{ix}\n"
+                        f"sampled token IDs (one per sequence):\n{xcol}\n"
+                        f"sampled token text: {sampled_text}\n"
+                        f"sequence 0 so far: {enc.decode(x[0].tolist())}\n"
+                    )
+
+            # Decode the B completed sequences.
+            for i in range(num_return_seq):
+                token_ids = x[i].tolist()  # token IDs, not probabilities
+                decoded = enc.decode(token_ids)
+                print("-->", decoded)
