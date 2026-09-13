@@ -1,229 +1,348 @@
 # Neural Networks: Zero to Hero — worked through
 
-My working repo for Andrej Karpathy's [**Neural Networks: Zero to Hero**](https://karpathy.ai/zero-to-hero.html) series — building language models from scratch in PyTorch, starting from a bigram count table and ending at a decoder-only Transformer.
+A hands-on learning repository following Andrej Karpathy's [**Neural Networks: Zero to Hero**](https://karpathy.ai/zero-to-hero.html) series, with annotated notebooks and from-scratch PyTorch implementations that build from character-level language models to Transformers, tokenization, and GPT-2 checkpoint reproduction.
 
-The point of the series is that nothing is imported as a black box. `nn.Transformer` never appears. Attention is written out as three linear projections and a masked softmax, so you can see exactly what "attention" computes and why every tensor has the shape it does. This repo is my pass through that material: the follow-along notebooks where each idea is built up one cell at a time, and the finished scripts they converge on — ending with the real GPT-2 architecture loading OpenAI's published weights.
+The goal here is not to hide the mechanics behind high-level APIs. The notebooks work through tensor shapes, loss functions, backpropagation, normalization, autoregressive generation, attention, tokenization, and checkpoint loading directly enough that the abstractions stop feeling magical.
 
-## Layout
+> **Current status:** the repository covers the full **makemore Parts 1–5 → GPT → GPT Tokenizer** progression and also includes a GPT-2 reproduction script. The official course begins one lecture earlier with **micrograd**, which is not yet included, so this is not yet a literal 100% mirror of the official syllabus.
 
-```
-├── nanogpt-lecture/
-│   ├── gpt_dev.ipynb                          # step-by-step development notebook
-│   ├── build_GPT.py                           # the finished ~10.8M-param GPT
-│   ├── GPT2_from_scratch - Andrej Karpathy.py # GPT-2 architecture + OpenAI weight loading
-│   └── input.txt                              # tiny Shakespeare, 1.1 MB / ~1.1M characters
-├── Tokenizer.ipynb      # BPE from scratch — the tokenizer lecture
-├── makemore/            # makemore series, parts 1-5, one notebook each
+## Course coverage
+
+| Topic | Repository artifact | Status |
+| --- | --- | --- |
+| Backpropagation / micrograd | — | **Not yet included** |
+| Makemore Part 1 — bigram language model | [`makemore/build_makemore_yay_bigram.ipynb`](makemore/build_makemore_yay_bigram.ipynb) | Complete |
+| Makemore Part 2 — MLP | [`makemore/build_makemore_yay_MLP.ipynb`](makemore/build_makemore_yay_MLP.ipynb) | Complete |
+| Makemore Part 3 — activations, gradients & BatchNorm | [`makemore/build_makemore_yay_RNN.ipynb`](makemore/build_makemore_yay_RNN.ipynb) | Complete |
+| Makemore Part 4 — manual backprop | [`makemore/build_makemore_manual_backprop.ipynb`](makemore/build_makemore_manual_backprop.ipynb) | Complete |
+| Makemore Part 5 — WaveNet-style hierarchy | [`makemore/build_makemore_yay_Wavenet.ipynb`](makemore/build_makemore_yay_Wavenet.ipynb) | Complete |
+| GPT from scratch | [`nanogpt-lecture/gpt_dev.ipynb`](nanogpt-lecture/gpt_dev.ipynb) + [`build_GPT.py`](nanogpt-lecture/build_GPT.py) | Notebook partial; finished script complete |
+| GPT tokenizer / BPE | [`Tokenizer.ipynb`](Tokenizer.ipynb) | Complete |
+| GPT-2 architecture + checkpoint loading | [`GPT2_from_scratch - Andrej Karpathy.py`](nanogpt-lecture/GPT2_from_scratch%20-%20Andrej%20Karpathy.py) | Extra follow-up implementation |
+
+## Repository layout
+
+```text
+├── Tokenizer.ipynb
+├── names.txt
+├── makemore/
 │   ├── build_makemore_yay_bigram.ipynb
 │   ├── build_makemore_yay_MLP.ipynb
 │   ├── build_makemore_yay_RNN.ipynb
 │   ├── build_makemore_manual_backprop.ipynb
 │   ├── build_makemore_yay_Wavenet.ipynb
-│   ├── makemore.py      # Karpathy's reference implementation
+│   ├── build_GPT.ipynb                     # currently an empty scaffold
+│   ├── makemore.py                         # Karpathy reference implementation
 │   └── names.txt
-└── names.txt            # 32,032 names — the makemore dataset
+└── nanogpt-lecture/
+    ├── gpt_dev.ipynb                       # incremental GPT development notebook
+    ├── build_GPT.py                        # finished ~10.8M-parameter character GPT
+    ├── GPT2_from_scratch - Andrej Karpathy.py
+    └── input.txt                           # Tiny Shakespeare
 ```
 
 ---
 
-## Building a GPT from scratch
+## 1. The makemore progression
+
+The makemore sequence is where the repository builds the fundamentals before attention appears. `names.txt` contains **32,032 names**, and the same character-level modeling problem is attacked with progressively richer neural-network machinery.
+
+| Notebook | Main idea | Recorded result |
+| --- | --- | --- |
+| `build_makemore_yay_bigram.ipynb` | Count-based bigram model, then the same model re-derived as a trainable neural network | loss **2.4622** |
+| `build_makemore_yay_MLP.ipynb` | Character embeddings, MLP context model, minibatching, learning-rate search, train/dev/test split | — |
+| `build_makemore_yay_RNN.ipynb` | Activation/gradient statistics, initialization, hand-rolled `Linear`, `Tanh`, and `BatchNorm1d` | train **2.4342** / val **2.4390** |
+| `build_makemore_manual_backprop.ipynb` | Manual differentiation through the entire MLP + BatchNorm stack and comparison with autograd | gradient checks |
+| `build_makemore_yay_Wavenet.ipynb` | Hierarchical character grouping with `FlattenConsecutive` and a custom `Sequential` | train **2.4243** / val **2.4378** |
+
+The important progression is not simply that each architecture pushes the loss lower. It is that each notebook exposes a different piece of neural-network mechanics: representations, optimization, initialization, normalization, manual gradient flow, and hierarchical context aggregation.
+
+Part 1 is especially useful because the count table is re-derived as a neural network. Once the learned weights and probabilities can be connected back to something analytically understandable, gradient descent stops looking like a black box.
+
+---
+
+## 2. Building GPT from scratch
 
 > Lecture: [*Let's build GPT: from scratch, in code, spelled out*](https://www.youtube.com/watch?v=kCc8FmEb1nY)
 
-### `gpt_dev.ipynb` — the development path
+There are two versions of the GPT work in this repository:
 
-The notebook is the incremental half, built in the order the ideas actually need to arrive:
+- [`gpt_dev.ipynb`](nanogpt-lecture/gpt_dev.ipynb) records the early step-by-step development path and currently stops at the bigram baseline.
+- [`build_GPT.py`](nanogpt-lecture/build_GPT.py) contains the finished decoder-only Transformer from the lecture.
 
-1. **Get the data.** Tiny Shakespeare — 1,115,394 characters of concatenated plays.
-2. **Build the vocabulary.** 65 unique characters, sorted. Character-level, so no tokenizer library: `stoi`/`itos` dicts and two lambdas are the entire encode/decode stack. The trade-off is explicit — tiny vocab, very long sequences.
-3. **Encode to a tensor** and split 90/10 into train and validation. The split is positional, not random, because the data is one continuous stream.
-4. **Understand the training signal.** A single block of 9 characters is really *8 separate training examples* — `[24] → 43`, `[24,43] → 58`, `[24,43,58] → 5`, and so on. The Transformer learns to predict from every prefix length at once, which is also what lets it generate from a cold start with only one token of context.
-5. **Add the batch dimension.** `get_batch` samples random offsets into the stream and stacks them into `(B, T)`, with `y` being `x` shifted one position. Every model from here on speaks in `(B, T, C)` — batch, time, channels.
-6. **The bigram baseline.** An `nn.Embedding(vocab_size, vocab_size)` used as a lookup table: each token reads off the logits for the next one directly, with no context at all beyond the current character.
+### Finished model configuration
 
-The bigram model's untrained loss comes out at **4.8786**. The floor for a uniform guess over 65 characters is `ln(65) ≈ 4.174`, and the gap is the cost of random initialization — the model starts out worse than knowing nothing. Sampling from it produces exactly the noise you'd expect:
-
-```
-SKIcLT;AcELMoTbvZv C?nq-QE33:CJqkOKH-q;:la!oiywkHjgChzbQ?u!3bLIgwevmyFJGUGp
-```
-
-That string is the baseline the rest of the lecture exists to beat.
-
-### `build_GPT.py` — the finished model
-
-The full decoder-only Transformer, following the lecture's reference implementation. **10,788,929 parameters** in this configuration:
+`build_GPT.py` contains **10,788,929 parameters**:
 
 | Hyperparameter | Value |
 | --- | --- |
-| `n_embd` | 384 |
-| `n_head` | 6 (head size 64) |
-| `n_layer` | 6 |
-| `block_size` | 256 |
-| `batch_size` | 64 |
-| `dropout` | 0.2 |
-| `learning_rate` | 3e-4 (AdamW) |
-| `max_iters` | 5,000 |
+| Embedding width | `384` |
+| Attention heads | `6` |
+| Transformer blocks | `6` |
+| Context length | `256` |
+| Batch size | `64` |
+| Dropout | `0.2` |
+| Optimizer | AdamW |
+| Learning rate | `3e-4` |
+| Training iterations | `5,000` |
 
-Where those parameters live:
+Parameter breakdown:
 
 | Component | Parameters |
-| --- | --- |
-| Token embedding (65 × 384) | 24,960 |
-| Position embedding (256 × 384) | 98,304 |
-| 6 × Transformer block | 10,639,872 |
+| --- | ---: |
+| Token embedding | 24,960 |
+| Position embedding | 98,304 |
+| 6 Transformer blocks | 10,639,872 |
 | Final LayerNorm | 768 |
-| LM head (384 → 65) | 25,025 |
+| LM head | 25,025 |
+| **Total** | **10,788,929** |
 
-The blocks are 98.6% of the model — embeddings and the output head are rounding errors. That ratio is the whole reason depth and width are the knobs that matter when scaling up.
+### What the implementation makes explicit
 
-### What each piece is doing
+**Causal self-attention.** Queries and keys form an affinity matrix of shape `(B, T, T)`. Scaling by `1 / sqrt(head_size)` keeps the softmax logits from becoming excessively sharp as the head dimension grows, while the lower-triangular mask prevents each token from reading future positions.
 
-**Attention is a data-dependent weighted average.** Every token emits a *query* ("what am I looking for?"), a *key* ("what do I contain?"), and a *value* ("what do I contribute?"). The affinity matrix `q @ k.transpose(-2,-1)` is `(B, T, T)` — how much each position wants to hear from each other position — and after softmax it weights the values. Attention itself has no notion of order; it's set operations on vectors.
+**Multi-head attention.** Six independent 64-dimensional heads run in parallel and concatenate back into the 384-dimensional residual stream before the output projection mixes them.
 
-**The `* k.shape[-1]**-0.5` scaling is not cosmetic.** Dot products of two random vectors of dimension `head_size` have variance proportional to `head_size`. Without dividing by `sqrt(head_size)`, the logits going into the softmax start out wide, the softmax saturates toward one-hot, and gradients through it vanish. Dividing keeps the initial distribution diffuse so every position gets gradient early in training.
+**Pre-LayerNorm residual blocks.** The model uses the modern pre-norm pattern:
 
-**Causality is one masked_fill.** `tril` is registered as a buffer, not a parameter — it's constant, but it needs to follow the model onto the GPU. Filling the upper triangle with `-inf` *before* the softmax makes those weights exactly zero after it, so position `t` can only attend to positions `≤ t`. Remove that one line and you have BERT-style bidirectional attention, which would leak the answer.
+```python
+x = x + self.sa(self.ln1(x))
+x = x + self.ffwd(self.ln2(x))
+```
 
-**Multi-head means several smaller attentions in parallel.** Six heads of size 64 concatenate back to 384. Each head is free to specialize — one on the previous character, another on matching quotes or line structure — and `self.proj` mixes them back together.
+The residual pathway gives gradients an identity route through the network while attention and the MLP learn residual updates.
 
-**Residual connections plus pre-LayerNorm are what make 6 layers trainable.** `x = x + self.sa(self.ln1(x))` gives gradients a clean identity path from the loss all the way back to the embeddings. Note the norm is applied *inside* the residual branch — pre-norm, which differs from the original 2017 paper and is far more stable to train.
+**Communication followed by computation.** Attention exchanges information across token positions; the `384 → 1536 → 384` feed-forward network then performs per-token computation on the result.
 
-**The feed-forward layer is where per-token computation happens.** Attention moves information between positions; the 4× expansion (384 → 1536 → 384) is the model thinking about what it gathered. Karpathy's framing — "communication followed by computation" — is the cleanest way to hold the block in your head.
+**Learned positional embeddings.** Self-attention itself is permutation-agnostic, so position embeddings inject ordering information and establish the model's finite context window.
 
-**Position embeddings are needed precisely because attention is order-blind.** A learned `nn.Embedding(block_size, n_embd)` added to the token embeddings supplies the ordering. It also hard-caps the context: nothing beyond `block_size` has a position vector, which is why `generate` crops with `idx[:, -block_size:]` on every step.
-
-**`estimate_loss` averages over 200 batches under `@torch.no_grad()`**, with `model.eval()` / `model.train()` around it so dropout is off while measuring. A single batch's loss is far too noisy to tell whether training is working.
-
-## Running it
-
-`build_GPT.py` needs only PyTorch:
+### Running the character GPT
 
 ```bash
 cd nanogpt-lecture
 python build_GPT.py
 ```
 
-The GPT-2 script additionally needs `transformers` (to fetch OpenAI's checkpoint) and `tiktoken` (for the BPE encoding):
-
-```bash
-pip install torch transformers tiktoken
-python "GPT2_from_scratch - Andrej Karpathy.py"
-```
-
-It downloads the 124M checkpoint on first run and prints five 30-token completions. Note the hardcoded `.to('cuda')` flagged under [Notes](#notes) — change it to `.to(device)` to run on CPU or Apple Silicon.
-
-It prints train and validation loss every 500 iterations and samples 500 characters at the end. Loss starts near `ln(65) ≈ 4.17` and should fall well below 2. This configuration wants a GPU — `device` is set automatically, but on CPU the 5,000 iterations at `block_size=256` will take a very long time. Drop `n_layer`, `n_embd` and `block_size` for a CPU-sized run.
+The script uses CUDA automatically when available and otherwise falls back to CPU. The full 5,000-step configuration is intended for a GPU; for a CPU smoke test, reduce `n_layer`, `n_embd`, `block_size`, `batch_size`, and `max_iters`.
 
 ---
 
-## Reproducing GPT-2
+## 3. Reproducing GPT-2
 
-> Lecture: [*Let's reproduce GPT-2 (124M)*](https://www.youtube.com/watch?v=l8pRSuU81PU)
+> Follow-up lecture: [*Let's reproduce GPT-2 (124M)*](https://www.youtube.com/watch?v=l8pRSuU81PU)
+>
 > Script: [`nanogpt-lecture/GPT2_from_scratch - Andrej Karpathy.py`](nanogpt-lecture/GPT2_from_scratch%20-%20Andrej%20Karpathy.py)
 
-Where `build_GPT.py` trains a small character-level model on Shakespeare, this script does the opposite: it defines the **real GPT-2 architecture**, then loads OpenAI's published 124M weights into it and generates. If the class definitions are even slightly wrong, the weights won't load — so the state-dict copy is itself the correctness test.
+This script defines a GPT-2-compatible architecture locally, downloads a Hugging Face `GPT2LMHeadModel`, copies the pretrained checkpoint into the local implementation, and generates text using the copied weights.
 
-### Same maths, OpenAI's naming
+The current implementation supports the architecture configurations for:
 
-The Transformer is identical in substance to `build_GPT.py`, but every module is renamed and reshaped to match the checkpoint it has to accept:
+- `gpt2`
+- `gpt2-medium`
+- `gpt2-large`
+- `gpt2-xl`
 
-| `build_GPT.py` | GPT-2 script | Why |
+The example at the bottom loads `gpt2`.
+
+### What changed in the latest implementation
+
+The current script fixes several rough edges from the earlier version:
+
+- model hyperparameters now live in a `GPTConfig` dataclass instead of unused module-level variables;
+- the `gpt2-large` configuration key is spelled correctly;
+- generated tokens are moved to the detected `device`, so CPU, CUDA, and Apple MPS are handled consistently;
+- dropout is now represented explicitly in attention and residual/MLP paths via `GPTConfig.dropout`.
+
+### Mapping the lecture implementation to GPT-2
+
+| Small GPT implementation | GPT-2 reproduction | Why |
 | --- | --- | --- |
-| separate `key`/`query`/`value` Linears | one `c_attn` of width `3 * n_embd`, then `.split()` | one batched matmul instead of three |
-| `Head` + `MultiHeadAttention` classes | a single `CausalSelfAttention` with `.view()`/`.transpose()` | heads become a tensor dimension, not Python objects |
-| `ReLU` in the feed-forward | `nn.GELU(approximate='tanh')` | GPT-2 used the tanh approximation |
-| `token_embedding_table` / `position_embedding_table` | `transformer.wte` / `transformer.wpe` inside an `nn.ModuleDict` | the checkpoint's key names |
-| dropout throughout | none | this stage of the video is inference-only |
+| separate K/Q/V linear layers | one `c_attn` projected to `3 * n_embd`, then split | one batched projection |
+| Python `Head` objects | tensorized multi-head attention | heads become a tensor dimension |
+| ReLU | `nn.GELU(approximate='tanh')` | matches GPT-2's activation |
+| token/position tables | `transformer.wte` / `transformer.wpe` | matches checkpoint naming |
+| independent block hyperparameters | `GPTConfig` | architecture is configured from one object |
+| attention + residual dropout | explicit `nn.Dropout` modules | disabled automatically during `model.eval()` |
 
-The config is the real thing — `vocab_size=50257` (50,000 BPE merges + 256 byte tokens + `<|endoftext|>`), `block_size=1024`, 12 layers, 12 heads, `n_embd=768`.
+For GPT-2 small, the structural configuration is:
 
-### The weight-loading surgery
+```text
+vocab_size = 50,257
+block_size = 1,024
+n_layer    = 12
+n_head     = 12
+n_embd     = 768
+```
 
-`from_pretrained` is the interesting part, and two details do the real work:
+### Checkpoint-loading surgery
 
-**Four weight matrices have to be transposed.** OpenAI's original TensorFlow implementation used a `Conv1D` layer rather than `nn.Linear`, and the two store their weights in opposite orientations. So `attn.c_attn.weight`, `attn.c_proj.weight`, `mlp.c_fc.weight` and `mlp.c_proj.weight` are copied with `.t()`, while everything else copies straight across. The `assert sd_hf[k].shape[::-1] == sd[k].shape` in that branch is what catches a mistake immediately.
+Four matrices require transposition because Hugging Face's GPT-2 checkpoint inherits OpenAI's `Conv1D` weight orientation:
 
-**The causal mask is filtered out of both state dicts.** `.attn.bias` (and HF's `.attn.masked_bias`) are registered buffers, not learned parameters — constants that must ride along to the GPU but carry nothing to copy. Dropping them from both key lists is what lets `len(sd_keys_hf) == len(sd_keys)` mean something.
+- `attn.c_attn.weight`
+- `attn.c_proj.weight`
+- `mlp.c_fc.weight`
+- `mlp.c_proj.weight`
+
+The implementation asserts the expected transposed shape before copying each tensor. Attention-mask buffers are excluded from the comparison because they are constants rather than learned parameters.
+
+This makes checkpoint loading a useful structural correctness test: if names or tensor shapes do not line up, the copy fails immediately.
 
 ### Generation
 
-Five sequences are seeded with the same prompt and extended to 30 tokens using **top-k sampling with k=50** — the HuggingFace pipeline default. Restricting each step to the 50 most likely tokens before renormalizing keeps the model from ever sampling the long tail of near-zero-probability nonsense, which is what makes short samples read coherently. Tokenization uses `tiktoken`'s `gpt2` encoding rather than the character-level `stoi`/`itos` from the earlier lecture.
+The script:
 
-### Parameter count: 163M, not 124M
+1. tokenizes `"Hello, I'm a language model,"` with `tiktoken`'s GPT-2 encoding;
+2. repeats the prompt across five sequences;
+3. runs the local GPT implementation;
+4. keeps the top 50 next-token candidates;
+5. samples one candidate with `torch.multinomial`;
+6. repeats until each sequence contains 30 tokens.
 
-Instantiating `GPT(GPTConfig())` as written gives **163,037,184 parameters**. The canonical figure is 124M, and the gap is exactly one design decision:
+Device selection is automatic:
 
-| | Parameters |
-| --- | --- |
-| Token embedding `wte` (50257 × 768) | 38,597,376 |
-| LM head (768 → 50257, no bias) | 38,597,376 |
-| **Total as written** | **163,037,184** |
-| **Total with the two tied** | **124,439,808** |
+```python
+device = 'cpu'
+if torch.cuda.is_available():
+    device = 'cuda'
+elif hasattr(torch.backends, 'mps') and torch.backends.mps.is_available():
+    device = 'mps'
+```
 
-GPT-2 ties those two matrices — the same table that maps token → vector is reused, transposed, to map vector → logits. It saves 38.6M parameters (24% of the model) and encodes a real assumption: tokens with similar input embeddings should get similar output scores. The video adds `self.transformer.wte.weight = self.lm_head.weight` in a later step; this script sits just before that point, so the loaded copy carries a redundant duplicate of the embedding table.
+### Why the local model reports 163M parameters instead of 124M
+
+The local implementation currently does **not tie** the input token embedding and output LM-head weights.
+
+| Component | Parameters |
+| --- | ---: |
+| Token embedding `wte` | 38,597,376 |
+| LM head | 38,597,376 |
+| **Total as currently instantiated** | **163,037,184** |
+| **Total with tied embedding/head weights** | **124,439,808** |
+
+The Hugging Face checkpoint provides identical values for the two tensors, so inference still reproduces the pretrained model's mapping after copying. They simply occupy separate parameter storage in this local class.
+
+### Dropout note
+
+The script is currently an **inference reproduction**, and `model.eval()` disables all dropout before generation, so the configured probability does not affect the generated outputs.
+
+If this class is extended into a faithful GPT-2 training implementation, two details should be revisited:
+
+- `GPTConfig.dropout` is currently `0.2`, whereas canonical GPT-2 uses `0.1` dropout probabilities;
+- GPT-2 also applies embedding dropout after adding token and positional embeddings, which this script does not currently implement.
 
 ---
 
-## The tokenizer
+## 4. Building the GPT tokenizer
 
 > Lecture: [*Let's build the GPT Tokenizer*](https://www.youtube.com/watch?v=zduSFxRajkE)
+>
 > Notebook: [`Tokenizer.ipynb`](Tokenizer.ipynb)
 
-The lecture that explains why `vocab_size=50257` is a number anyone chose. It starts from the observation that text is bytes — `"안녕하세요"` is 15 UTF-8 bytes, not 5 characters — and that a raw byte vocabulary of 256 would make sequences hopelessly long.
+The tokenizer notebook moves below the model layer and builds Byte Pair Encoding from raw UTF-8 bytes.
 
-The notebook builds byte-pair encoding from scratch: count adjacent pairs with `get_stats`, merge the most frequent into a new token id with `merge`, repeat to a target vocabulary size, then write `encode`/`decode` against the learned merge table. From there it covers the parts that separate a toy BPE from a real one:
+It covers:
 
-- **The GPT-2 regex split.** Before merging, text is chopped by a hand-written pattern (`'s|'t|'re|... ?\p{L}+| ?\p{N}+|...`) so merges can never cross a word/number/punctuation boundary. This is why GPT-2 tokenizes `"   hello"` the way it does, compared against `tiktoken` directly.
-- **The real artifacts.** OpenAI's published `encoder.json` and `vocab.bpe` are downloaded and inspected — 256 byte tokens + 50,000 merges + 1 special token is precisely where 50,257 comes from, and `<|endoftext|>` is looked up in the table.
-- **The minbpe exercise** — a `Tokenizer` base class scaffolding the train/encode/decode interface.
-- **SentencePiece**, trained with (best-effort) Llama 2 settings, to contrast the byte-level BPE that GPT uses against the approach taken by most open models.
+- Unicode code points versus UTF-8 bytes;
+- pair-frequency counting;
+- iterative BPE merges;
+- encode/decode logic over a learned merge table;
+- GPT-2's regex-based text splitting;
+- inspection of GPT-2's published `encoder.json` and `vocab.bpe` artifacts;
+- why GPT-2 ends up with a 50,257-token vocabulary;
+- a minimal tokenizer interface inspired by `minbpe`;
+- SentencePiece as a contrasting tokenizer family.
 
----
-
-## The makemore series
-
-> Lectures: [makemore part 1](https://www.youtube.com/watch?v=PaCmpygFfXo) through part 5
-
-`names.txt` — 32,032 of the most common US baby names — is the dataset for the earlier half of the series, which arrives at the Transformer from the other direction. Each notebook in [`makemore/`](makemore/) is one lecture, and every one of them ends at roughly the same loss:
-
-| Notebook | Lecture | What it builds | Result |
-| --- | --- | --- | --- |
-| `build_makemore_yay_bigram.ipynb` | Part 1 | Bigram counts, then the *same* model re-derived as a one-hot input into a single linear layer trained by gradient descent | loss **2.4622** |
-| `build_makemore_yay_MLP.ipynb` | Part 2 | Bengio et al. 2003 MLP — character embeddings, a 3-character context window, minibatching, learning-rate search, and a proper 80/10/10 train/dev/test split | |
-| `build_makemore_yay_RNN.ipynb` | Part 3 | Activations and gradients: hand-rolled `Linear`, `Tanh` and `BatchNorm1d` modules, watching saturation and initialization scale decide whether the net trains at all | train **2.4342** / val **2.4390** |
-| `build_makemore_manual_backprop.ipynb` | Part 4 | Backprop by hand through the entire MLP + BatchNorm — 29 `cmp()` gradient checks against autograd, no `loss.backward()` | |
-| `build_makemore_yay_Wavenet.ipynb` | Part 5 | A WaveNet-style hierarchical model: `FlattenConsecutive` fusing characters in pairs across layers, wrapped in a homemade `Sequential` | train **2.4243** / val **2.4378** |
-
-That flat loss curve across five increasingly sophisticated models is the actual lesson of the series. A count-based bigram table gets **2.4622**; a hierarchical convolutional network with BatchNorm gets **2.4243**. The architecture barely moved the number, because a 3-character context is the binding constraint — which is exactly the problem attention was invented to solve, and why the series ends at a Transformer.
-
-Part 1 re-deriving the count table as a neural net is the pivot the whole series rests on: once you've seen that the trained weights converge to the log-counts, "training a network" stops being magic and becomes something you can predict the answer to.
-
-The folder also carries Karpathy's `makemore.py` and `names.txt` from [karpathy/makemore](https://github.com/karpathy/makemore) for reference, plus an empty `build_GPT.ipynb` placeholder.
+The important conceptual separation is that **the tokenizer is trained independently from the language model**. It defines the discrete vocabulary and sequence representation the model receives; many seemingly strange LLM behaviors originate in this preprocessing layer rather than in the Transformer itself.
 
 ---
 
-## Notes
+## Running the GPT-2 script
 
-Both scripts follow the lectures' reference implementations closely — this is a learning repo, and the value is in the annotations above rather than in any claim to a novel architecture. The rough edges below are recorded rather than quietly fixed, since knowing where a follow-along stopped is part of the record.
+```bash
+pip install torch transformers tiktoken
+cd nanogpt-lecture
+python "GPT2_from_scratch - Andrej Karpathy.py"
+```
 
-**`gpt_dev.ipynb`**
+The first run downloads the selected Hugging Face GPT-2 checkpoint. `gpt2-medium`, `gpt2-large`, and especially `gpt2-xl` require substantially more RAM/VRAM than the default small model.
 
-* Currently stops at the bigram model. The self-attention derivation from the second half of the lecture — the running-average trick and the four progressively better versions of it — goes here next, and it's the most instructive part of the whole video.
-* The last line of the bigram cell won't run as written (unbalanced parentheses, and `torch.zeros(idx, ...)` where `idx` was meant to be passed straight to `generate`). The saved output is from an earlier working version of the cell.
+The notebooks are easiest to run in Jupyter or Google Colab. A pinned repository-level environment is not yet included; adding one is on the recommended cleanup list below.
 
-**`GPT2_from_scratch - Andrej Karpathy.py`**
+---
 
-* **`'gpt2-largs'` is a typo for `'gpt2-large'`** in the `config_args` table. The assert above it accepts `'gpt2-large'`, so that argument passes validation and then dies on a `KeyError` one line later. The other three model types are unaffected.
-* **`x = tokens.to('cuda')` is hardcoded**, immediately after the block that carefully autodetects `cuda`/`mps`/`cpu`. On anything without CUDA the script raises rather than falling back — `tokens.to(device)` is the intended line.
-* **The module-level hyperparameters are dead code.** `batch_size`, `block_size`, `max_iters`, `eval_interval`, `learning_rate`, `eval_iters`, `n_embd`, `n_head`, `n_layer` and `dropout` are carried over from `build_GPT.py`, but the model reads everything from `GPTConfig` instead — none of the ten is referenced after the class definitions. `dropout = 0.2` is especially misleading, since the model contains no `nn.Dropout` at all.
-* **Inference only.** `forward` returns logits with no `targets` argument and no loss, there is no optimizer, and there is no `generate` method — sampling is written inline at module level. Training is the next stage of the video.
-* **No `if __name__ == "__main__"` guard**, so importing anything from this file downloads GPT-2 and runs generation as a side effect.
+## Known gaps and rough edges
+
+This is intentionally a learning repository rather than a polished library, but these are the current limitations worth keeping explicit.
+
+### `gpt_dev.ipynb`
+
+- The notebook currently stops at the **bigram baseline**, while the finished Transformer lives in `build_GPT.py`.
+- Its final generation cell is malformed: `torch.zeros(idx, ...)` is used where the seed tensor should be passed to `generate`, and the expression has mismatched parentheses. The saved output comes from an earlier working state.
+- Its Colab badge still points to the older `pop123-ux/makemore-project` path instead of this repository.
+
+### `GPT2_from_scratch - Andrej Karpathy.py`
+
+- It is currently **inference-only**: `forward` returns logits, there is no target/loss path, optimizer, scheduler, or training loop.
+- Sampling is written inline at module level rather than exposed as a reusable `generate()` method.
+- There is no `if __name__ == "__main__":` guard, so importing the file also downloads the checkpoint and starts generation.
+- Input embeddings and the LM head are not weight-tied, so the local class allocates about 163M parameters rather than GPT-2 small's canonical ~124M.
+- Dropout is sufficient for inference reproduction because it is disabled in evaluation mode, but the class is not yet an exact GPT-2 training implementation.
+
+### Repository structure
+
+- `makemore/build_GPT.ipynb` currently contains only empty cells and should either be populated or removed.
+- `names.txt` is duplicated at the repository root and inside `makemore/`.
+- There is no top-level `requirements.txt` / `pyproject.toml` describing the full environment.
+- There is no top-level automated test suite or GitHub Actions workflow.
+- The official course's opening **micrograd** lecture is not yet represented.
+
+---
+
+## Recommended validation targets
+
+For turning this from a strong learning archive into a stronger portfolio repository, the highest-value tests are small and deterministic — full training does **not** belong in CI.
+
+1. **GPT forward-shape test** — verify `(B, T)` token IDs produce the expected logits shape.
+2. **Causal-mask test** — changing a future token must not change logits at an earlier position.
+3. **Parameter-count test** — lock the small GPT at `10,788,929` parameters unless the architecture intentionally changes.
+4. **Checkpoint-equivalence test** — after loading GPT-2 weights, compare local logits against Hugging Face GPT-2 for the same short token sequence with a tight tolerance.
+5. **Tokenizer round-trip tests** — verify `decode(encode(text)) == text` across ASCII, Unicode, whitespace, and emoji examples.
+6. **BPE parity tests** — compare the finished GPT-2 tokenizer path against `tiktoken` on a small fixed corpus.
+7. **Notebook smoke checks** — at minimum validate notebook JSON and syntax; execute only lightweight notebooks/cells in CI.
+
+A compact CPU-only `pytest` suite covering those properties would add more portfolio value than committing trained checkpoints or running multi-hour training jobs in Actions.
+
+---
+
+## Suggested next steps
+
+In priority order:
+
+1. **Add the micrograd lecture** so the repository genuinely covers the official Zero to Hero syllabus from the beginning.
+2. **Finish or repair `gpt_dev.ipynb`**, especially the attention derivation and broken final cell.
+3. **Delete or populate `makemore/build_GPT.ipynb`** — an empty notebook weakens the repo more than its absence would.
+4. **Add `pyproject.toml` or `requirements.txt` + a CPU test suite + GitHub Actions.**
+5. **Add GPT-2 weight tying and a reusable `generate()` method.**
+6. **Add a numerical Hugging Face parity test** for the copied GPT-2 checkpoint.
+7. **Rename the GPT-2 script** to something shell-friendly such as `gpt2_from_scratch.py` and place the executable demo behind a `__main__` guard.
+8. **Deduplicate `names.txt`** and make all makemore notebooks use the same canonical dataset path.
+9. **Add a top-level license/attribution file** covering the repository as a whole, while retaining credit to Karpathy and upstream datasets/code.
+
+---
 
 ## Credits
 
-All lecture material by [Andrej Karpathy](https://github.com/karpathy) — [Zero to Hero](https://karpathy.ai/zero-to-hero.html), [nanoGPT](https://github.com/karpathy/nanoGPT), [makemore](https://github.com/karpathy/makemore). Tiny Shakespeare comes from [char-rnn](https://github.com/karpathy/char-rnn).
+The course material and original educational implementations are by [Andrej Karpathy](https://github.com/karpathy):
+
+- [Neural Networks: Zero to Hero](https://karpathy.ai/zero-to-hero.html)
+- [makemore](https://github.com/karpathy/makemore)
+- [nanoGPT](https://github.com/karpathy/nanoGPT)
+
+Tiny Shakespeare comes from the [char-rnn](https://github.com/karpathy/char-rnn) dataset.
+
+This repository is my worked-through learning record: notebooks, annotations, experiments, and implementation notes built while following the material.
 
 ## 🔗 More
 
 - Author: [@pop123-ux](https://github.com/pop123-ux)
-- Medium write-ups: [medium.com/@Pop123](https://medium.com/@Pop123)
+- Medium: [medium.com/@Pop123](https://medium.com/@Pop123)
